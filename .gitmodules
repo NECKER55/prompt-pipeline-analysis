@@ -1,0 +1,6 @@
+[submodule "tradinGroups"]
+	path = tradinGroups
+	url = https://github.com/NECKER55/tradinGroups.git
+[submodule "AppFromPrompts"]
+	path = AppFromPrompts
+	url = https://github.com/NECKER55/AppFromPrompts.git

@@ -4,14 +4,21 @@ A post-mortem analysis of an experiment: **can a real web application be recreat
 
 ## The experiment
 
-The same application — a stock-trading simulator with social groups, virtual currency and role-based permissions — exists in two versions:
+The same application — a stock-trading simulator with social groups, virtual currency and role-based permissions — exists in two versions, both included in this repository as **git submodules**:
 
-| Repository | What it is |
-|---|---|
-| [**tradinGroups**](https://github.com/NECKER55/tradinGroups) | The **handwritten reference implementation** (Express + Prisma + PostgreSQL, Vite + React). ~16.8k lines of TypeScript. |
-| [**AppFromPrompts**](https://github.com/NECKER55/AppFromPrompts) | The **AI-generated implementation**, built by GitHub Copilot agents through a 7-phase prompt pipeline starting from `specifiche.md`. ~50k lines (source + tests), 384 commits. |
+| Submodule | Repository | What it is |
+|---|---|---|
+| [`tradinGroups/`](tradinGroups) | [NECKER55/tradinGroups](https://github.com/NECKER55/tradinGroups) | The **handwritten reference implementation** (Express + Prisma + PostgreSQL, Vite + React). ~16.8k lines of TypeScript. |
+| [`AppFromPrompts/`](AppFromPrompts) | [NECKER55/AppFromPrompts](https://github.com/NECKER55/AppFromPrompts) | The **AI-generated implementation**, built by GitHub Copilot agents through a 7-phase prompt pipeline starting from `specifiche.md`. ~50k lines (source + tests), 384 commits. |
 
 The pipeline expanded the spec into 4 technical documents, decomposed them into 42 atomic features, gave each feature to an isolated TDD agent (feature file + a shared `MASTER_SYSTEM_CONTEXT.md` as its *entire* context), then ran QA gap-analysis and integration-test phases.
+
+## The analysis
+
+The full 14-page report — detailed pipeline description, metrics, evidence with file-level references, root-cause analysis and concrete recommendations for the next pipeline iteration — is available in two languages:
+
+- 🇬🇧 **English**: [`ENG/pipeline_analysis_finApp.pdf`](ENG/pipeline_analysis_finApp.pdf) ([LaTeX source](ENG/pipeline_analysis_finApp.tex))
+- 🇮🇹 **Italiano**: [`ITA/analisi_pipeline_finApp.pdf`](ITA/analisi_pipeline_finApp.pdf) ([LaTeX source](ITA/analisi_pipeline_finApp.tex))
 
 ## The findings (TL;DR)
 
@@ -34,13 +41,23 @@ The pipeline expanded the spec into 4 technical documents, decomposed them into 
 
 Context rot did not strike *inside* the agents' contexts — it struck **in the spaces between agents**.
 
-## Contents
+## Cloning
 
-- [`pipeline_post_mortem.pdf`](pipeline_post_mortem.pdf) — the full 14-page analysis: detailed pipeline description, metrics, evidence (with file-level references), root-cause analysis and 9 concrete recommendations for the next pipeline iteration
-- [`pipeline_post_mortem.tex`](pipeline_post_mortem.tex) — LaTeX source
-
-## Building the PDF
+To get this repository **including both application repositories**:
 
 ```bash
-pdflatex pipeline_post_mortem.tex && pdflatex pipeline_post_mortem.tex
+git clone --recurse-submodules https://github.com/NECKER55/prompt-pipeline-analysis.git
+```
+
+If you already cloned it without submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
+## Building the PDFs
+
+```bash
+cd ENG && pdflatex pipeline_analysis_finApp.tex && pdflatex pipeline_analysis_finApp.tex
+cd ITA && pdflatex analisi_pipeline_finApp.tex && pdflatex analisi_pipeline_finApp.tex
 ```

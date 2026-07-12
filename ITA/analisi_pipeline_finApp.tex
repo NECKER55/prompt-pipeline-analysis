@@ -1,0 +1,432 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[italian]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{float}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=black!60!black,urlcolor=blue!60!black]{hyperref}
+
+\definecolor{okgreen}{RGB}{0,128,64}
+\definecolor{warnorange}{RGB}{204,102,0}
+\definecolor{failred}{RGB}{178,34,34}
+\newcommand{\ok}[1]{\textcolor{okgreen}{\textbf{#1}}}
+\newcommand{\warn}[1]{\textcolor{warnorange}{\textbf{#1}}}
+\newcommand{\fail}[1]{\textcolor{failred}{\textbf{#1}}}
+\newcommand{\file}[1]{\texttt{\small #1}}
+
+\title{\textbf{Analisi post-mortem della pipeline di generazione automatica}\\[4pt]
+\Large Confronto tra \texttt{finApp} (implementazione manuale) e il progetto\\
+generato da GitHub Copilot (\texttt{AppFromPrompts})}
+\author{NECKER}
+\date{12 luglio 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent Questo documento analizza l'esito di un esperimento di sviluppo software interamente guidato da agenti AI: la ricostruzione di una web app finanziaria (simulatore di trading con gruppi sociali) a partire dal solo documento \file{specifiche.md}, tramite una pipeline di prompt sequenziali data in pasto a GitHub Copilot. Il risultato generato (cartella \file{Desktop/prompts}) viene confrontato con l'implementazione manuale di riferimento (\file{finApp}). L'analisi quantifica cosa ha funzionato (type-safety perfetta, copertura funzionale ampia, disciplina di processo), cosa \`e fallito (81 suite di test su 265 non passano, tripla implementazione della stessa logica di business, architettura a code costruita ma mai collegata, integrazione posticcia a fine progetto) e ricostruisce le cause radice, con particolare attenzione ai meccanismi di \emph{context rot} --- la degradazione progressiva della coerenza quando pi\`u agenti lavorano in isolamento su contesti parziali. Il documento si chiude con raccomandazioni operative per la prossima iterazione della pipeline.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% =====================================================================
+\section{Introduzione e obiettivo}
+% =====================================================================
+
+L'esperimento nasce da una domanda precisa: \emph{\`e possibile ricreare una web app reale, gi\`a costruita a mano, usando esclusivamente una pipeline di prompt strutturati e agenti di coding, senza incorrere nei classici errori da context rot?}
+
+I due artefatti confrontati sono:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{\file{finApp}} --- l'implementazione manuale di riferimento: backend Express + Prisma + PostgreSQL, frontend Vite + React (SPA con React Router), immagini su Cloudinary, motore di trading a \file{setInterval}. Circa 16.800 righe di TypeScript, 30 commit tra il 19 marzo e il 4 aprile 2026.
+  \item \textbf{\file{Desktop/prompts}} --- il progetto generato dalla pipeline: monorepo con backend Express + Prisma e frontend Next.js (App Router) annidato in \file{src/frontend}, circa 23.500 righe di sorgente pi\`u 26.400 righe di test (265 file di test), 384 commit tra il 22 febbraio e il 19 marzo 2026.
+\end{itemize}
+
+Il verdetto sintetico, anticipato: \textbf{la pipeline ha prodotto un'enorme quantit\`a di codice di buona qualit\`a locale, ma non un'applicazione integrata e funzionante end-to-end}. Ogni feature, presa da sola, \`e ben scritta, tipata e testata; il sistema nel suo complesso contiene per\`o tre implementazioni parallele della stessa logica di business, un'infrastruttura a code interamente morta, e una fase di integrazione finale improvvisata che ha rotto test precedentemente verdi senza che nessun agente se ne accorgesse. Il context rot non si \`e manifestato come ``l'agente dimentica le istruzioni'', ma come \textbf{divergenza sistemica tra mondi paralleli costruiti da agenti che non si sono mai parlati}.
+
+% =====================================================================
+\section{La pipeline utilizzata}
+% =====================================================================
+
+La pipeline era composta da sette tipologie di prompt, applicate in sequenza. Se ne d\`a qui una descrizione dettagliata, perch\'e la struttura stessa della pipeline \`e parte delle cause analizzate pi\`u avanti.
+
+\subsection{Fase 1 --- Espansione delle specifiche in quattro documenti tecnici}
+Un prompt con ruolo ``Software Architect e Tech Lead Senior'' riceve \file{specifiche.md} (327 righe) e genera quattro documenti tecnici ``progressivi'': (1) architettura e costruzione del database, (2) motore backend e algoritmi core, (3) infrastruttura API e sicurezza, (4) frontend e UI/UX. La regola fondamentale imposta era: \emph{``NON SINTETIZZARE. Ogni documento deve essere lungo, estremamente dettagliato e includere ogni singola regola di business''}.
+
+Risultato: 4 documenti per un totale di \textbf{11.154 righe} (rispettivamente 1.337, 3.585, 2.329 e 3.903 righe) --- un fattore di espansione di circa 34$\times$ rispetto alla specifica originale.
+
+\subsection{Fase 2 --- Decomposizione di ogni documento in feature atomiche}
+Ogni documento viene scomposto in ``feature atomiche indipendenti'', ognuna con un proprio documento di specifica pensato come system prompt per un agente TDD. Requisiti chiave: ciclo Red-Green-Refactor stretto, commit Conventional Commits a ogni ciclo verde, e soprattutto \emph{``ogni documento deve permettere a un agente di lavorare senza conoscere le altre feature''}.
+
+Risultato: \textbf{42 feature totali} --- 12 per il documento database, 12 per il backend, 10 per le API, 8 per il frontend.
+
+\subsection{Fase 3 --- Controllo di coerenza dei documenti feature}
+Un prompt di verifica chiedeva se, svolgendo tutte le feature con un agente ciascuna, si sarebbe ottenuta l'app completa in modo ordinato e coerente. Per il documento 4 questa fase ha effettivamente individuato problemi reali (componente \file{GroupCard} triplicato tra tre feature, dipendenze non dichiarate tra feature 3, 5 e 8) e ha prodotto due artefatti correttivi: \file{FIX\_REPORT.md} e \file{SHARED\_CONTRACTS.md}, quest'ultimo con i contratti TypeScript condivisi. \`E significativo che questi artefatti esistano \emph{solo} per il documento 4: per i documenti 1--3 la verifica non ha lasciato tracce equivalenti.
+
+\subsection{Fase 4 --- Creazione del MASTER\_SYSTEM\_CONTEXT}
+Un prompt di sintesi ha condensato specifiche + 4 documenti in un file di contesto per gli agenti (\file{MASTER\_SYSTEM\_CONTEXT.md}, 329 righe): regole di business non negoziabili, matrice ruoli/permessi, schema DB essenziale, riferimento endpoint, flusso del motore di trading, stack tecnologico (con divieto esplicito del Pages Router di Next.js), codici d'errore con i testi esatti, linee guida DO/NEVER --- inclusa la regola in maiuscolo sul \textbf{mocking obbligatorio} di code, Redis e API esterne nei test.
+
+\subsection{Fase 5 --- Implementazione di ogni feature (un agente per feature)}
+Ogni agente riceveva come ``intero universo di conoscenza'' esclusivamente il proprio file feature e il master context, con istruzione esplicita di ignorare ogni altra convenzione. Doveva committare all'inizio (per separare le feature), poi a ogni verde, autoverificarsi a fine lavoro e produrre un file di resoconto (\file{RESOCONTO\_FEATURE\_*.md}).
+
+\subsection{Fase 6 --- QA per feature (Gap Analysis)}
+Un prompt con ruolo ``Senior QA Engineer'' confrontava l'implementazione con il documento PRD, producendo un report diagnostico per gravit\`a (BLOCCANTE / MAGGIORE / MINORE) su gap, vincoli di dominio, RBAC e edge case.
+
+\subsection{Fase 7 --- Test di integrazione per documento}
+Completate tutte le feature di un documento, un prompt ``SDET'' generava una suite di integrazione (Jest + Supertest + Prisma) su isolamento dei flussi, errori di dominio, RBAC e mocking dei servizi esterni. Ogni fase era seguita da eventuali cicli di correzione se i controlli fallivano.
+
+% =====================================================================
+\section{Metodologia di analisi}
+% =====================================================================
+
+L'analisi \`e stata condotta direttamente sui due repository, con misure riproducibili:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Compilazione}: \file{npx tsc --noEmit} sull'intero progetto generato.
+  \item \textbf{Test}: esecuzione completa di \file{npx jest} (265 suite), con classificazione dei fallimenti per causa (errore d'ambiente vs regressione reale) tramite ispezione dei log.
+  \item \textbf{Storia git}: distribuzione temporale dei 384 commit, aderenza a Conventional Commits, pattern ``commit a ogni verde''.
+  \item \textbf{Analisi strutturale}: mappatura di servizi, repository, worker, middleware e relative dipendenze di import, per individuare codice morto e duplicazioni.
+  \item \textbf{Confronto documentale}: specifiche originali vs documenti generati vs codice, e artefatti di processo (\file{TODO.md}, \file{VERIFICA\_SPECIFICHE.md}, report diagnostici, resoconti feature).
+  \item \textbf{Confronto con \file{finApp}}: schema Prisma, architettura runtime, struttura del frontend, gestione cron/immagini.
+\end{itemize}
+
+% =====================================================================
+\section{Stato del progetto generato: le metriche}
+% =====================================================================
+
+\subsection{Quadro d'insieme}
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{lrr}
+\toprule
+\textbf{Metrica} & \textbf{\file{prompts} (generato)} & \textbf{\file{finApp} (manuale)} \\
+\midrule
+Righe TypeScript sorgente & $\sim$23.556 & $\sim$16.817 \\
+Righe di test & $\sim$26.391 (265 file) & 0 \\
+Commit & 384 (22 feb -- 19 mar) & 30 (19 mar -- 4 apr) \\
+Endpoint REST & 68 (in un unico file) & $\sim$60 (per dominio, 5 router) \\
+Migrazioni Prisma & 12 & 13 \\
+Modelli Prisma & 11 + 5 enum & 12 + 5 enum \\
+Trigger DB & subset (in 6 migrazioni) & migrazione dedicata \\
+Frontend & Next.js App Router in \file{src/frontend} & Vite + React Router, repo separato \\
+Coda ordini & BullMQ/Redis \fail{(mai collegata)} & \file{setInterval} 60s \\
+\bottomrule
+\end{tabular}
+\caption{Confronto quantitativo tra i due progetti.}
+\end{table}
+
+\subsection{Compilazione: verde}
+\file{tsc --noEmit} termina con \ok{0 errori} su circa 50.000 righe complessive. \`E un risultato non banale e va riconosciuto: il vincolo TypeScript strict imposto dal master context ha retto attraverso 42 agenti diversi.
+
+\subsection{Test: rosso, nonostante i resoconti dicano il contrario}
+L'esecuzione completa della suite d\`a:
+
+\begin{center}
+\fail{81 suite fallite} / 183 passate / 1 saltata \quad---\quad \fail{370 test falliti} / 589 passati su 963
+\end{center}
+
+Ogni singolo \file{RESOCONTO\_FEATURE\_*.md} dichiara invece la propria suite verde, e il report diagnostico del documento 1 (datato 17 marzo) certifica ``75 passed, 1 skipped''. Questo scarto tra \emph{stato dichiarato} e \emph{stato reale} \`e il singolo dato pi\`u importante dell'intera analisi, e viene scomposto nella sezione~\ref{sec:test-breakdown}.
+
+\subsection{Timeline dei commit}
+La distribuzione temporale racconta come \`e andato davvero il lavoro:
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{lrl}
+\toprule
+\textbf{Giorno} & \textbf{Commit} & \textbf{Attivit\`a prevalente} \\
+\midrule
+22--23 feb 2026 & 14 & Feature frontend (doc 4): profilo, immagini, primo scheletro Next.js \\
+13 mar 2026 & 18 & Ripresa: guard DB amicizie (doc 1) \\
+16 mar 2026 & 23 & Feature doc 1 (stock, portfolio, transazioni) \\
+17 mar 2026 & \warn{200} & Grosso delle feature doc 1--3 + gap closure \\
+18 mar 2026 & 128 & Feature restanti, wiring, remediation TODO \\
+19 mar 2026 & 1 & Ultimo ritocco \\
+\bottomrule
+\end{tabular}
+\caption{Commit per giorno nel repository generato.}
+\end{table}
+
+Met\`a del progetto (328 commit su 384) \`e stata generata in 48 ore. In quelle stesse 48 ore sono state prese tutte le decisioni di integrazione --- ed \`e l\`i che si concentrano i danni.
+
+% =====================================================================
+\section{Cosa ha funzionato}
+% =====================================================================
+
+\`E importante essere onesti sui successi, perch\'e definiscono cosa \emph{conservare} della pipeline.
+
+\begin{enumerate}[leftmargin=1.8em]
+  \item \textbf{Type-safety totale.} Zero errori di compilazione su 50k righe scritte da 42 agenti diversi. Il vincolo ``TypeScript + Prisma per tutto'' nel master context ha funzionato da contratto implicito pi\`u efficace di qualunque prosa.
+
+  \item \textbf{Fedelt\`a dello schema dati.} Lo schema Prisma generato \`e sostanzialmente sovrapponibile a quello di \file{finApp}: stesse entit\`a (Persona, Gruppo, Portafoglio, Transazione, Azioni in possesso, Amicizia, Membro/Invito gruppo, Watchlist, Storico), stessi enum, uso corretto e sistematico di \file{Decimal} per i valori monetari (mai \file{Float}). La regola ``DECIMAL, mai float'' --- ripetuta in specifiche, master context e singole feature --- \`e stata rispettata ovunque. \textbf{La ridondanza mirata sulle regole critiche paga.}
+
+  \item \textbf{Copertura funzionale del frontend.} Il frontend Next.js copre tutte le pagine della specifica: homepage pubblica, login/registrazione, area personale, pagina azione con pannello di trading, area gruppi con dettaglio, pagina social, overview persona, impostazioni account. Le rotte dinamiche (\file{groups/[id]}, \file{stock/[id]}, \file{user/[id]}) sono corrette, il divieto del Pages Router \`e stato rispettato, Zustand e React Query sono usati come da specifica, lo smart polling degli ordini pendenti esiste (\file{useSmartPolling.ts}).
+
+  \item \textbf{Disciplina di processo.} I 384 commit sono realmente Conventional Commits, realmente granulari (un ciclo verde $\approx$ un commit), con baseline \file{chore:} a inizio feature. La storia git \`e leggibile e permette di ricostruire l'ordine di costruzione --- \`e proprio grazie a questa disciplina che l'analisi \`e stata possibile.
+
+  \item \textbf{Trigger e vincoli a livello DB (parziale).} Le migrazioni contengono trigger reali: auto-ordinamento e unicit\`a delle amicizie, no self-friendship, cancellazione automatica dell'invito all'ingresso nel gruppo, single-owner, check constraint su coerenza Buy/Sell. Il ciclo QA del documento 1 ha aggiunto in ``gap closure'' il trigger sui permessi di trading e i check anti-bypass con \file{IS NOT NULL}.
+
+  \item \textbf{Il ciclo QA ha trovato problemi veri.} Il report diagnostico del doc 1 ha individuato correttamente: trigger mancanti, rischio IDOR sulla creazione ordini (nessuna verifica di ownership del portafoglio), divergenza RBAC Admin/Owner sulla modifica saldi, edge case sul cancel di ordini sell. Le prime correzioni sono state applicate e testate. Anche la fase 3 (coerenza feature doc 4) ha intercettato la triplicazione di \file{GroupCard} \emph{prima} dell'implementazione, producendo \file{SHARED\_CONTRACTS.md}.
+
+  \item \textbf{Il TODO finale come radiografia.} \file{TODO.md} --- generato nella fase di allineamento finale --- \`e un documento di qualit\`a: elenca con precisione mock da sostituire, endpoint sbagliati, funzioni client mancanti, violazioni architetturali (grafici che dovevano essere delegati a TradingView), bug di logica (perdita del prezzo medio all'annullamento di una vendita). Quasi tutto risulta poi effettivamente corretto e spuntato.
+\end{enumerate}
+
+% =====================================================================
+\section{Cosa \`e andato storto}
+% =====================================================================
+
+\subsection{La tripla implementazione della logica di business}
+\label{sec:tripla}
+
+\`E il fallimento pi\`u grave e il pi\`u istruttivo. Nel progetto convivono \textbf{tre implementazioni parallele degli stessi concetti} (Tabella~\ref{tab:tripla}):
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{p{4.1cm}p{4.6cm}p{5.2cm}}
+\toprule
+\textbf{Origine} & \textbf{Convenzione} & \textbf{Artefatti} \\
+\midrule
+Feature doc 1 (database) & Italiano, \file{nome.service.ts} & \file{portfolio.service.ts}, \file{transazione.service.ts}, 11 repository in \file{src/repositories/} (\file{persona}, \file{portafoglio}, \dots) \\
+\addlinespace
+Feature doc 2 (backend) & Inglese, \file{PascalCase.ts} & \file{PortfolioService.ts}, \file{TradingService.ts}, 4 repository in \file{src/database/repositories/} \\
+\addlinespace
+Wiring finale (fase TODO) & Inline, prisma diretto & \file{runtimeDependencies.ts}: 1.317 righe che reimplementano ordini, saldi, snapshot con query Prisma dirette \\
+\bottomrule
+\end{tabular}
+\caption{Le tre implementazioni coesistenti della stessa logica.}
+\label{tab:tripla}
+\end{table}
+
+I due servizi ``Portfolio'' non condividono nulla: uno usa \file{Prisma.Decimal} e i codici errore di \file{types/errors.ts}, l'altro usa \file{decimal.js} e una gerarchia di errori propria (\file{PortfolioServiceErrors}), con concetti inventati come \file{DEFAULT\_GROUP\_BUDGET\_LIMIT}. Nessuno dei due \`e sbagliato in s\'e --- sono \emph{mondi coerenti ma incompatibili}, costruiti da agenti a cui era stato ordinato di ignorare tutto ci\`o che non fosse il proprio file feature. Il problema \`e riconosciuto anche internamente: l'ultimo item aperto del \file{TODO.md} recita \emph{``C'\`e logica ridondante o non unificata tra \file{TransazioneService.executeOrder} e \file{TransactionWorker.ts}''}.
+
+\subsection{L'architettura a code: costruita, testata, mai collegata}
+
+Le feature 1--3 del documento 2 hanno costruito l'intero impianto BullMQ/Redis: \file{src/queue/} (connessione, code, scheduler, tipi), \file{TransactionWorker.ts} (366 righe), \file{SnapshotWorker.ts}, con test unitari verdi e mock conformi alla regola del master context. Poi, al momento del cablaggio reale, \file{runtimeDependencies.ts} ha implementato il motore di trading con due semplici \file{setInterval} (sweep ordini e snapshot), chiamando direttamente \file{TransazioneService.executeOrder}. Risultato: \textbf{l'intera infrastruttura a code \`e codice morto} --- nessun file di runtime importa i worker o le code.
+
+L'ironia \`e che la scelta del \file{setInterval} \`e quella \emph{giusta}: \`e esattamente ci\`o che fa \file{finApp} (cron interno a 60 secondi in \file{tradingEngine.ts}). Il problema non \`e la soluzione finale, ma che la pipeline abbia fatto costruire e testare per giorni un'infrastruttura che l'integrazione ha poi ignorato, senza che nessuno la rimuovesse o la collegasse.
+
+\subsection{Il monolite API e l'app che girava sui mock}
+
+\file{createApiApp.ts} \`e un file di \textbf{2.553 righe} contenente tutti i 68 endpoint. Definisce un proprio contratto di dipendenze (\file{ApiDependencies}: \file{authService}, \file{portfolioService}, \file{tradingService}, \file{marketService}, \file{adminService}) che \textbf{non corrisponde a nessuno dei servizi costruiti dalle feature dei documenti 1 e 2}: \`e una terza tassonomia, inventata dall'agente della feature ``API routes''. Per farla girare, \file{src/index.ts} forniva \file{createDevDependencies()}: dati finti hardcoded (portafoglio con AAPL e MSFT, token \file{dev-access-token}, ricerche che ritornano array vuoti).
+
+In pratica, \textbf{per la maggior parte della vita del progetto l'app ``funzionava'' su dati finti}, e tutti i test HTTP passavano contro i mock. Solo nella fase finale (\file{TODO.md}, item 1) i mock sono stati sostituiti dal bootstrap reale con Prisma --- ed \`e in questa saldatura tardiva che si \`e concentrato il caos: la fase di wiring ha dovuto scoprire e correggere in un colpo solo decine di discrepanze (path errati, metodi client mancanti, cron non collegato, snapshot senza asset congelati).
+
+\subsection{Il breakdown dei test falliti}
+\label{sec:test-breakdown}
+
+Le 81 suite fallite si dividono in due famiglie molto diverse:
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{p{6.2cm}rp{6.2cm}}
+\toprule
+\textbf{Famiglia} & \textbf{Suite} & \textbf{Causa} \\
+\midrule
+Test feature doc 1 (friendship, watchlist, user, transaction, stock, portfolio, permission, membership, invitation, holdings, historical, group: 6--7 suite ciascuno) & $\sim$73 & \file{PrismaClientInitializationError}: i test richiedono un PostgreSQL reale con credenziali locali (868 errori ``Authentication failed against database server''). Non riproducibili fuori dalla macchina/momento in cui furono scritti. \\
+\addlinespace
+Test frontend e integrazione (\file{homepage} it.~1, \file{personal-dashboard} it.~1/8/11, \file{social-interface} it.~5, \file{doc4-remediation}) & $\sim$8 & \fail{Regressioni reali}: i commit successivi di wiring e remediation (es. \file{6b83485} ``close feature3 wiring gaps'') hanno modificato componenti --- rimosso \file{testid} come \file{portfolio-overview-skeleton}, cambiato composizioni --- senza rieseguire le suite delle iterazioni precedenti. \\
+\bottomrule
+\end{tabular}
+\caption{Classificazione delle 81 suite fallite.}
+\end{table}
+
+Entrambe le famiglie sono fallimenti \emph{di pipeline}, non di sfortuna:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item La prima \`e una \textbf{violazione diretta della regola pi\`u enfatizzata del master context} (``MOCKING OBBLIGATORIO [\dots] i test non devono MAI tentare connessioni di rete reali''): gli agenti del documento 1 hanno scritto sistematicamente test d'integrazione contro un Postgres vivo. La regola scritta in maiuscolo non \`e bastata, perch\'e i loro file feature (il loro ``universo di conoscenza'') descrivevano trigger e vincoli DB che \emph{hanno senso solo} su un database reale: quando istruzione locale e regola globale confliggono, l'agente segue l'istruzione locale.
+  \item La seconda \`e l'assenza di un \textbf{regression gate}: nessun agente delle fasi successive aveva l'obbligo di rieseguire l'intera suite prima di committare. Ognuno verificava solo i propri test (``verdi''), e le rotture altrui restavano invisibili. \`E la formalizzazione perfetta del context rot: \emph{ci\`o che \`e fuori dal contesto dell'agente non esiste, nemmeno quando \`e un test rosso}.
+\end{itemize}
+
+\subsection{RBAC: il middleware c'\`e, le rotte non lo usano}
+
+La feature 2 del documento 3 ha costruito \file{rbacGroupMiddleware.ts} + \file{PermissionSystem} con test verdi. Le rotte di \file{createApiApp.ts} per\`o eseguono controlli di ruolo manuali (\file{getEffectiveGroupRole}) --- item ancora aperto nel TODO. Stesso pattern della coda: \textbf{il componente giusto esiste, l'integrazione lo ignora}. La falla ``Admin espelle Admin'' \`e stata poi chiusa, ma nel service layer, creando un ulteriore punto di verit\`a sui permessi (middleware, service, controlli inline).
+
+\subsection{Amplificazione documentale e feature inventate}
+
+Il divieto di sintesi in fase 1 ha trasformato 327 righe di specifiche in 11.154 righe di documenti. In quell'espansione 34$\times$, ogni documento ha \emph{inventato} requisiti plausibili ma mai richiesti, che le fasi successive hanno trattato come obblighi contrattuali, producendo feature intere:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item doc 2, feature 11: \emph{Performance Monitoring} (\file{PerformanceCollector}, \file{PerformanceAnalytics}, \file{AlertManager}, \file{HealthCheckService});
+  \item doc 3, feature 9--10: \emph{Error Handling \& Resilience} (circuit breaker, retry con backoff) e \emph{Rate Limiting \& Security} (\file{ddosProtector}, \file{securityAuditLogger}, rate limiter adattivo);
+  \item doc 4, feature 7: achievements utente, privacy settings, grafici performance con timeframe --- assenti dalle specifiche;
+  \item il master context ha aggiunto di suo la strategia dual-API ``Finnhub real-time + Polygon.io daily'' (le specifiche citavano Finnhub \emph{o} Polygon come alternative) e un \file{AnalyticsWebSocketService} \`e comparso nel codice nonostante la specifica prescrivesse esplicitamente short polling.
+\end{itemize}
+
+Una quota rilevante delle $\sim$50.000 righe generate --- plausibilmente un quarto --- serve requisiti che non esistono. Ogni riga inventata \`e costata tempo di generazione, test, QA, e ha allargato la superficie su cui il context rot poteva agire.
+
+\subsection{Struttura di progetto anomala}
+
+Un unico \file{package.json} mescola Express, Prisma, BullMQ, Next.js, React 19 e le testing library; il frontend vive in \file{src/frontend} \emph{dentro} il source tree del backend (con la cartella \file{.next} committata insieme ai sorgenti); i test in tre posti diversi (\file{src/tests/}, \file{*.test.ts} accanto ai file, \file{\_\_tests\_\_/}). \`E l'accumulo di 42 decisioni locali mai riconciliate --- nessun agente aveva l'autorit\`a (o il contesto) per dire ``il frontend \`e un progetto separato''. \file{finApp}, per confronto, ha due package indipendenti con confini netti.
+
+\subsection{QA a copertura diseguale}
+
+Il ciclo diagnostico previsto dalla fase 6 risulta documentato solo per il documento 1: in \file{reports/} esiste unicamente \file{REPORT\_DIAGNOSTICO\_DOC1\_} \file{GAP\_ANALYSIS.md} (con due cicli di gap closure). Per i documenti 2, 3 e 4 non esistono report equivalenti nel repository. Proprio le aree senza QA formale (API wiring, frontend) sono quelle in cui si concentrano le regressioni reali.
+
+% =====================================================================
+\section{Confronto con finApp}
+% =====================================================================
+
+\subsection{Filosofie opposte}
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{p{4.2cm}p{4.9cm}p{4.9cm}}
+\toprule
+& \textbf{\file{finApp} (manuale)} & \textbf{\file{prompts} (generato)} \\
+\midrule
+Filosofia & Minimo indispensabile che funziona & Massimo teorico descritto nei documenti \\
+Motore di trading & \file{setInterval} 60s + endpoint protetti da \file{CRON\_SECRET} & BullMQ/Redis (morto) + \file{setInterval} (attivo) \\
+Frontend & Vite SPA, React Router, repo separato & Next.js App Router dentro il backend \\
+Immagini & Cloudinary con crop client & \file{OptimizedImage} + placeholder SVG generativi (nessun provider reale collegato) \\
+Test & 0 (verifica manuale + \file{API\_ROUTES\_CHECKLIST.md}) & 963 (38\% falliti) \\
+Sicurezza & JWT + middleware auth/cron, helmet, rate limit & JWT + RBAC + audit + DDoS protector (integrazione parziale) \\
+Fonte di verit\`a & Il codice stesso + checklist & 5 documenti + 42 feature + master context \\
+\bottomrule
+\end{tabular}
+\caption{Confronto architetturale e di metodo.}
+\end{table}
+
+\subsection{Osservazioni chiave}
+
+\textbf{1. La spec era pi\`u ambiziosa dell'app reale --- e la pipeline non poteva saperlo.} \file{specifiche.md} descrive Redis, BullMQ, caching multilivello, tre formati d'immagine WebP. \file{finApp} non implementa quasi nulla di tutto ci\`o: niente Redis, niente code, cron semplice. Chi ha scritto la spec sapeva quali parti fossero aspirazionali; la pipeline, per costruzione (``non omettere nulla''), le ha trattate tutte come requisiti vincolanti e le ha pure amplificate. \textbf{Il documento di specifica dato a una pipeline AI deve distinguere il ``must'' dal ``nice to have''}, perch\'e l'AI non ha il contesto per farlo da sola.
+
+\textbf{2. Dove la spec era precisa, il generato \`e allineato.} Schema dati, messaggi d'errore testuali, flusso ordini pending/executed, isolamento privato/gruppo: su tutto ci\`o che le specifiche definivano in dettaglio, i due progetti convergono in modo notevole. La qualit\`a dell'output \`e direttamente proporzionale alla precisione dell'input.
+
+\textbf{3. Il generato \`e ``pi\`u completo'' sulla carta, meno funzionante in pratica.} Il progetto generato ha pi\`u endpoint, pi\`u vincoli DB dichiarati, test, monitoring, resilienza. Ma \file{finApp} \`e un'applicazione che gira coerentemente end-to-end, mentre il generato \`e un insieme di ottimi moduli con saldature fragili. Per un simulatore di trading, l'integrit\`a end-to-end del flusso ordine$\to$esecuzione$\to$saldo vale pi\`u di qualunque circuit breaker.
+
+% =====================================================================
+\section{Analisi delle cause radice: dove ha agito il context rot}
+% =====================================================================
+
+I sintomi descritti sopra discendono da cinque cause strutturali della pipeline.
+
+\subsection{Causa 1 --- L'isolamento degli agenti senza contratti condivisi eseguibili}
+La regola ``ogni agente lavora solo col suo file feature + master context'' \`e stata pensata proprio per combattere il context rot: contesti piccoli, freschi, focalizzati. Ha per\`o eliminato l'unico blocco alla divergenza: la \emph{conoscenza reciproca}. Il master context descriveva regole di business e stack, ma non i \textbf{contratti concreti}: nomi dei file, firme dei servizi, convenzione di naming, struttura delle cartelle. Ogni agente ha quindi inventato la propria tassonomia, e 42 tassonomie non compongono un sistema. La prova a contrario esiste nel progetto stesso: dove un contratto condiviso c'era (\file{SHARED\_CONTRACTS.md} per il doc 4; lo schema Prisma per tutti), la convergenza c'\`e stata.
+
+\subsection{Causa 2 --- Integrazione come fase finale anzich\'e vincolo continuo}
+La pipeline costruiva prima tutti i pezzi e poi li saldava (mock in \file{index.ts} $\to$ wiring finale). Ogni errore di interfaccia \`e rimasto invisibile finch\'e tutti i pezzi non sono stati appoggiati uno sull'altro, e a quel punto la correzione \`e avvenuta sotto pressione, in un contesto ormai enorme, da parte di agenti che non conoscevano le feature originali: \`e il momento esatto in cui sono nate la terza implementazione inline (\ref{sec:tripla}) e le regressioni frontend. In termini di context rot: \textbf{pi\`u a lungo si rinvia l'integrazione, pi\`u contesto serve per farla, e meno contesto \`e disponibile}.
+
+\subsection{Causa 3 --- ``Verde'' locale scambiato per ``verde'' globale}
+Il protocollo TDD imponeva di committare a ogni verde \emph{della propria feature}. Nessuna fase imponeva di rieseguire tutto. I resoconti sono quindi tutti sinceramente verdi e il progetto \`e complessivamente rosso. Senza un gate automatico esterno agli agenti (CI), l'autocertificazione non ha valore probatorio: l'agente riporta ci\`o che vede nel suo contesto, e nel suo contesto era tutto verde davvero.
+
+\subsection{Causa 4 --- L'espansione documentale come moltiplicatore di allucinazioni}
+Ogni passaggio generativo documento$\to$documento aggiunge dettagli plausibili non presenti alla sorgente; il passaggio successivo li tratta come requisiti. Con quattro salti (specifiche $\to$ documenti $\to$ feature $\to$ master context $\to$ codice), le invenzioni si sono accumulate e \emph{legittimate a vicenda} (il rate limiting inventato dal doc 3 \`e rientrato nel master context, che l'ha reso obbligatorio per tutti). \`E context rot in forma documentale: la fonte di verit\`a si allontana a ogni copia.
+
+\subsection{Causa 5 --- Regole globali che perdono contro le istruzioni locali}
+La regola del mocking obbligatorio, pur scritta in maiuscolo nel master context, \`e stata ignorata da 12 feature su 12 del documento 1 --- perch\'e i loro file feature richiedevano di verificare trigger e vincoli che esistono solo nel database reale. Quando la regola globale contraddice il compito locale, l'agente risolve il conflitto a favore del compito. Le regole trasversali vanno quindi rese \emph{impossibili da violare} (ambienti, fixture, script di test forniti) invece che \emph{proibite a parole}.
+
+% =====================================================================
+\section{Raccomandazioni per la prossima iterazione della pipeline}
+% =====================================================================
+
+\begin{enumerate}[leftmargin=1.8em]
+  \item \textbf{Sostituire l'espansione con la strutturazione.} Non chiedere quattro documenti ``lunghi ed esaustivi che non omettono nulla'': chiedere documenti che \emph{riorganizzino} le specifiche senza aggiungere requisiti, con regola inversa (``se un requisito non \`e nelle specifiche, non pu\`o comparire; se ritieni manchi qualcosa, elencalo in una sezione OPEN QUESTIONS''). Marcare nelle specifiche cosa \`e vincolante e cosa \`e aspirazionale.
+
+  \item \textbf{Contratti prima delle feature (contract-first).} Prima di lanciare qualunque agente implementatore, generare e congelare: schema Prisma, elenco endpoint con DTO request/response (es. OpenAPI), \textbf{interfacce TypeScript dei servizi con i nomi dei file}, struttura delle cartelle e convenzione di naming (una sola lingua). Il \file{SHARED\_CONTRACTS.md} del doc 4 va promosso da rattoppo a fase obbligatoria per tutto il sistema. Ogni feature implementa contro questi contratti, e la compilazione diventa il test d'integrazione gratuito.
+
+  \item \textbf{Walking skeleton prima delle feature.} Primo agente: costruire l'app minima reale end-to-end (un utente si registra, compra un'azione, il cron la esegue, il saldo si aggiorna --- DB vero, zero mock nel runtime). Tutte le feature successive innestano su un sistema che gi\`a funziona, e ogni rottura dell'integrazione \`e visibile subito. Vietare esplicitamente dependency injection ``di comodo'' con mock hardcoded nel main.
+
+  \item \textbf{Regression gate meccanico.} Ogni agente, prima di ogni commit, esegue \emph{l'intera} suite (o almeno un sottoinsieme di smoke test end-to-end definito centralmente), non solo i propri test. Idealmente: uno script \file{npm run verify} fornito dallo skeleton, il cui esito verde \`e condizione per il commit. L'autocertificazione nel resoconto va sostituita dall'output reale del comando.
+
+  \item \textbf{Due categorie di test, con infrastruttura fornita.} Separare \file{test:unit} (mock, sempre eseguibili) da \file{test:integration} (PostgreSQL effimero via Docker/testcontainers, avviato dallo script stesso). La regola ``mai connessioni reali nei test unitari'' si applica fornendo il template di setup, non scrivendola in maiuscolo.
+
+  \item \textbf{Un agente integratore ricorrente.} Ogni $N$ feature (non alla fine), un agente con compito esclusivo: eseguire la suite completa, cercare duplicazioni di simboli/servizi, verificare che ogni modulo nuovo sia importato dal runtime (il codice non raggiungibile da \file{index.ts} \`e un errore), aggiornare i contratti se necessario. Avrebbe intercettato sia la doppia service layer sia la coda morta con settimane di anticipo.
+
+  \item \textbf{QA uniforme e tracciato.} Il ciclo gap-analysis va eseguito (e archiviato in \file{reports/}) per ogni documento, non solo per il primo; e ogni fix post-QA deve ripassare dal regression gate, perch\'e \`e statisticamente la fase che introduce pi\`u regressioni.
+
+  \item \textbf{Dimensionare le feature sul valore, non sulla decomponibilit\`a.} 42 feature per quest'app significano 41 punti di sutura. Una decomposizione in 10--15 slice \emph{verticali} (es. ``ciclo di vita ordine completo, DB$\to$API$\to$UI'') riduce le interfacce interne, che sono esattamente il luogo dove il context rot colpisce.
+
+  \item \textbf{Il master context deve contenere esempi normativi, non solo regole.} Un file di esempio per servizio, test e rotta (con naming, import, struttura) vincola pi\`u di dieci regole in prosa: gli agenti imitano molto meglio di quanto obbediscano.
+\end{enumerate}
+
+% =====================================================================
+\section{Conclusioni}
+% =====================================================================
+
+La pipeline ha dimostrato che una squadra di agenti pu\`o produrre, in pochi giorni, la superficie completa di un'applicazione non banale con qualit\`a locale alta: tipi corretti, schema dati fedele, UI completa, storia git esemplare. Ha per\`o anche dimostrato, con evidenza quantitativa, che \textbf{la qualit\`a locale non compone automaticamente qualit\`a globale}: 38\% dei test falliti, tre implementazioni della stessa logica, un'infrastruttura a code interamente morta e un'integrazione finale che ha rotto ci\`o che era verde.
+
+Il context rot non ha colpito dove lo si aspettava --- dentro il contesto del singolo agente, che anzi la strategia dei contesti piccoli e freschi ha protetto bene --- ma \textbf{negli spazi tra gli agenti}: nelle interfacce mai concordate, nei requisiti moltiplicati a ogni passaggio documentale, nel ``verde'' locale mai verificato globalmente, nell'integrazione rimandata all'ultimo momento. La correzione della pipeline non richiede quindi prompt migliori, ma \textbf{vincoli meccanici condivisi}: contratti eseguibili definiti prima, uno scheletro funzionante da subito, e un gate di regressione che nessun agente possa autocertificare. Le parole nel contesto si degradano; i contratti compilabili e i test eseguiti no.
+
+\appendix
+\newpage
+
+% =====================================================================
+\section{Appendice A --- Esito completo della test suite}
+% =====================================================================
+
+Esecuzione di \file{npx jest} sul repository \file{Desktop/prompts} (12 luglio 2026):
+
+\begin{verbatim}
+Test Suites: 81 failed, 1 skipped, 183 passed, 264 of 265 total
+Tests:       370 failed, 4 skipped, 589 passed, 963 total
+\end{verbatim}
+
+Suite fallite per regressione reale (non ambientale):
+
+\begin{itemize}[leftmargin=1.5em,itemsep=1pt]
+  \item \file{src/tests/homepage/iteration1.homepage-layout.test.tsx}
+  \item \file{src/tests/personal-dashboard/iteration1.dashboard-layout.test.tsx}
+  \item \file{src/tests/personal-dashboard/iteration8.dashboard-composition.test.tsx}
+  \item \file{src/tests/personal-dashboard/iteration11.page-wiring-actions-and-polling.test.tsx}
+  \item \file{src/tests/social-interface/iteration5.social-dashboard-composition.test.tsx}
+  \item \file{src/tests/integration/doc4-remediation.integration.test.ts}
+\end{itemize}
+
+\begin{sloppypar}
+Suite fallite per dipendenza da PostgreSQL reale (868 occorrenze di \emph{Authentication failed against database server}): tutte le suite nelle cartelle sotto \file{src/tests/} relative alle feature del documento~1 --- \file{friendship-system}, \file{watchlist-management}, \file{user-management}, \file{transaction-processing}, \file{stock-management}, \file{portfolio-management}, \file{permission-management}, \file{membership-management}, \file{invitation-system}, \file{holdings-management}, \file{historical-data-management}, \file{group-management} --- pi\`u \file{integration/doc1-full-system} e \file{integration/gap-closure}.
+\end{sloppypar}
+
+% =====================================================================
+\section{Appendice B --- Inventario delle duplicazioni}
+% =====================================================================
+
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+  \sloppy
+  \item \textbf{Servizi portafoglio}: \file{src/services/PortfolioService.ts} (494 righe, decimal.js, errori propri) vs \file{src/services/portfolio.service.ts} (118 righe, Prisma.Decimal) vs logica inline in \file{src/runtime/} \file{runtimeDependencies.ts}.
+  \item \textbf{Servizi trading}: \file{src/services/TradingService.ts} (310 righe) vs \file{src/services/transazione.service.ts} (183 righe) vs \file{src/workers/TransactionWorker.ts} (366 righe, mai importato dal runtime).
+  \item \textbf{Repository}: \file{src/repositories/} (11 file, naming italiano: \file{persona}, \file{portafoglio}, \file{gruppo}, \dots) vs \file{src/database/repositories/} (4 file, naming inglese: \file{UserRepository}, \file{PortfolioRepository}, \dots).
+  \item \textbf{Esecuzione ordini}: \file{TransazioneService.executeOrder} (usata dal runtime) vs \file{TransactionWorker} (coda BullMQ, morta) --- duplicazione riconosciuta come item aperto in \file{TODO.md}.
+  \item \textbf{Controlli permessi}: \file{rbacGroupMiddleware} (costruito, non usato dalle rotte) vs controlli manuali \file{getEffectiveGroupRole} in \file{createApiApp.ts} vs check in \file{PermissionService} --- tre punti di verit\`a.
+\end{itemize}
+
+% =====================================================================
+\section{Appendice C --- Cronologia essenziale del progetto generato}
+% =====================================================================
+
+Ricostruzione dalla storia git (384 commit totali):
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{llp{8.5cm}}
+\toprule
+\textbf{Data} & \textbf{Commit} & \textbf{Evento} \\
+\midrule
+22--23 feb & 14 & Feature doc 4 (frontend): profilo utente, sistema immagini; primo scheletro Next.js. \\
+13 mar & 18 & Ripresa dopo tre settimane: friendship system con guard DB (doc 1). \\
+16 mar & 23 & Stock, portfolio e transaction management (doc 1). \\
+17 mar & 200 & Picco: completamento doc 1, gap analysis e due cicli di gap closure; feature doc 2 (coda, worker, servizi); avvio doc 3. \\
+18 mar & 128 & Feature doc 3 (JWT, RBAC, endpoint, resilienza, rate limiting), integrazione API, remediation \file{TODO.md}, wiring runtime reale. \\
+19 mar & 1 & Ultimo commit (homepage client). Lo stesso giorno inizia lo sviluppo manuale di \file{finApp}. \\
+\bottomrule
+\end{tabular}
+\caption{Timeline del repository generato.}
+\end{table}
+
+\end{document}
