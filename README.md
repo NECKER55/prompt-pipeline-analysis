@@ -56,7 +56,7 @@ git submodule update --init --recursive
 ```
 
 ## Building the PDFs
-
+ 
 ```bash
 cd ENG && pdflatex pipeline_analysis_finApp.tex && pdflatex pipeline_analysis_finApp.tex
 cd ITA && pdflatex analisi_pipeline_finApp.tex && pdflatex analisi_pipeline_finApp.tex
